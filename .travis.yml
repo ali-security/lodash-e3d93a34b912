@@ -22,27 +22,18 @@ env:
     -
     - BIN=phantomjs
     - ISTANBUL=true
-    - SAUCE_LABS=true
 
 matrix:
   include:
     - node_js: 6
       env:
+    - node_js: 12
+      env:
+    - node_js: 4
+      env:
 
 git:
   depth: 10
-
-branches:
-  only:
-    - master
-    - 4.17.5
-
-notifications:
-  webhooks:
-    urls:
-      - https://webhooks.gitter.im/e/4aab6358b0e9aed0b628
-    on_success: change
-    on_failure: always
 
 before_install:
   # Upgrade PhantomJS.
@@ -63,6 +54,8 @@ before_install:
   # Setup package managers.
   - npm set loglevel error
   - npm set progress false
+  # yarn 0.16.1 crashes on Node 4 and yarn 1.22 needs newer syntax, so the Node 4 leg installs under Node 6 and switches back to Node 4 for the tests.
+  - if [ "$TRAVIS_NODE_VERSION" = "4" ]; then nvm install 6; fi
   - npm i -g yarn@0.16.1
   - yarn -V
 
@@ -88,35 +81,46 @@ install:
   - yarn
 
   # Use lodash-cli from GitHub.
-  - git clone --depth=10 --branch=master git://github.com/lodash/lodash-cli ./node_modules/lodash-cli
-  - mkdir -p ./node_modules/lodash-cli/node_modules/lodash; cd $_; cp ../../../../lodash.js ./lodash.js; cp ../../../../package.json ./package.json
-  - cd ../../; npm i --production; cd ../../
+  - git clone https://github.com/lodash/lodash-cli.git ./node_modules/lodash-cli
+  - git -C ./node_modules/lodash-cli checkout 91176e422d7c10634a59c7e367fe224795ef5a24
+  - cd ./node_modules/lodash-cli; npm i --production; cd ../../
+  # Inject this repo's lodash.js after npm i, which otherwise overwrites it with lodash-cli's shrinkwrapped lodash.
+  - mkdir -p ./node_modules/lodash-cli/node_modules/lodash; cp ./lodash.js ./package.json ./node_modules/lodash-cli/node_modules/lodash/
 
 script:
+  # Run the Node 4 leg's tests on Node 4 (dependencies were installed under Node 6).
+  - if [ "$TRAVIS_NODE_VERSION" = "4" ]; then nvm use 4; fi
+  - node --version
   # Detect code coverage.
   - |
-      if [ $ISTANBUL = true ]; then
-        istanbul cover -x "**/vendor/**" --report lcovonly ./test/test.js -- ./lodash.js
-        if [ $TRAVIS_SECURE_ENV_VARS = true ]; then
-          cat ./coverage/lcov.info | coveralls
-          cat ./coverage/coverage.json | codecov
+      (
+        set -e
+        if [ $ISTANBUL = true ]; then
+          istanbul cover -x "**/vendor/**" --report lcovonly ./test/test.js -- ./lodash.js
+          if [ $TRAVIS_SECURE_ENV_VARS = true ]; then
+            cat ./coverage/lcov.info | coveralls
+            cat ./coverage/coverage.json | codecov
+          fi
         fi
-      fi
+      )
 
   # Test in Node.js and PhantomJS.
   - |
-      if [ $ISTANBUL = false ]; then
-        node ./node_modules/lodash-cli/bin/lodash -o ./dist/lodash.js
-        node ./node_modules/lodash-cli/bin/lodash modularize exports=node -o ./
-        node ./node_modules/lodash-cli/bin/lodash -d -o ./lodash.js
-        if [ $SAUCE_LABS = false ]; then
-          cd ./test
-          $BIN $OPTION ./test.js ../lodash.js
-          if [ $TRAVIS_SECURE_ENV_VARS = true ]; then
-            $BIN $OPTION ./test.js ../dist/lodash.min.js
+      (
+        set -e
+        if [ $ISTANBUL = false ]; then
+          node ./node_modules/lodash-cli/bin/lodash -o ./dist/lodash.js
+          node ./node_modules/lodash-cli/bin/lodash modularize exports=node -o ./
+          node ./node_modules/lodash-cli/bin/lodash -d -o ./lodash.js
+          if [ $SAUCE_LABS = false ]; then
+            cd ./test
+            $BIN $OPTION ./test.js ../lodash.js
+            if [ $TRAVIS_SECURE_ENV_VARS = true ]; then
+              $BIN $OPTION ./test.js ../dist/lodash.min.js
+            fi
           fi
         fi
-      fi
+      )
 
   # Test in Sauce Labs.
   - |

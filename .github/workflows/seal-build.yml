@@ -1,0 +1,86 @@
+name: seal-build
+on:
+  workflow_dispatch:
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "12"
+      - name: Generate lodash modules with lodash-cli
+        run: |
+          set -eo pipefail
+          node -v; npm -v
+          mkdir -p /tmp/cli
+          cd /tmp/cli
+          npm init -y >/dev/null
+          npm install --ignore-scripts --no-audit "https://github.com/lodash/lodash-cli/archive/91176e422d7c10634a59c7e367fe224795ef5a24.tar.gz"
+          # CVE-2026-4800 switches `_.template` from assignInWith to assignWith and adds
+          # arrayEach. lodash-cli's hardcoded dependency map must list them, otherwise the
+          # modularized template.js omits their require() calls and throws
+          # `ReferenceError: assignWith is not defined` (lodash issue #6167).
+          MAPPING=/tmp/cli/node_modules/lodash-cli/lib/mapping.js
+          sed -i "s/'template': \['customDefaultsAssignIn', 'assignInWith',/'template': ['customDefaultsAssignIn', 'arrayEach', 'assignWith',/" "$MAPPING"
+          grep -q "'template': \['customDefaultsAssignIn', 'arrayEach', 'assignWith'," "$MAPPING"
+          LODASH_JS=$(cd node_modules/lodash-cli && node -e "console.log(require.resolve('lodash'))")
+          cp "$GITHUB_WORKSPACE/lodash.js" "$LODASH_JS"
+          mkdir -p /tmp/art
+          cd /tmp/art
+          node /tmp/cli/node_modules/lodash-cli/bin/lodash modularize exports=node -o ./
+          # Minify the patched lodash.js with lodash-cli so lodash.min.js carries the
+          # CVE-2021-23337 `_.template` `variable` guard and the CVE-2026-4800 `imports`
+          # guard (from unpatched source this
+          # reproduces the committed dist/lodash.min.js byte-for-byte).
+          mkdir -p /tmp/min
+          cd /tmp/min
+          node /tmp/cli/node_modules/lodash-cli/bin/lodash -o ./lodash.js
+      # Copy core/minified modules from the committed dist/ (byte-identical to
+      # the published files; `npm run build` re-minifies with a different header).
+      # lodash.min.js is then replaced with the one minified from the patched source.
+      - name: Add core, minified and fp modules
+        run: |
+          set -eo pipefail
+          npm install --ignore-scripts --no-audit
+          node lib/main/build-modules.js /tmp/art
+          node lib/fp/build-modules.js /tmp/art
+          cp /tmp/min/lodash.min.js /tmp/art/lodash.min.js
+      # The packed modules are not covered by test/test.js, so check that the modular
+      # template, its fp wrapper and lodash.min.js load and reject unsafe `imports` keys.
+      - name: Smoke-test packed template modules
+        run: |
+          set -eo pipefail
+          cd /tmp/art
+          node -e "
+            var assert = require('assert');
+            var template = require('./template');
+            var fpTemplate = require('./fp/template');
+            var min = require('./lodash.min');
+            assert.strictEqual(template('<%= a %>', { 'imports': { 'a': 'ok' } })(), 'ok');
+            assert.strictEqual(fpTemplate('<%= a %>')({ 'a': 'ok' }), 'ok');
+            assert.strictEqual(min.template('<%= a %>', { 'imports': { 'a': 'ok' } })(), 'ok');
+            [template, min.template].forEach(function(fn) {
+              assert.throws(function() {
+                fn('', { 'imports': { 'a = (global.hit = true, 1)': undefined } });
+              }, /Invalid .imports. option passed into ._.template./);
+            });
+            assert.strictEqual(global.hit, undefined);
+            console.log('template modules OK');
+          "
+      - name: Add package files and pack
+        run: |
+          set -eo pipefail
+          cp "$GITHUB_WORKSPACE/lodash.js" /tmp/art/lodash.js
+          cp "$GITHUB_WORKSPACE/LICENSE" /tmp/art/LICENSE
+          cp "$GITHUB_WORKSPACE"/npm-extras/* /tmp/art/
+          cd /tmp/art
+          ls | wc -l
+          npm pack --ignore-scripts
+          ls -l lodash-4.17.15.tgz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lodash-4.17.15
+          path: /tmp/art/lodash-4.17.15.tgz
+          if-no-files-found: error
