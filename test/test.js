@@ -22251,6 +22251,55 @@
       }
     });
 
+    QUnit.test('should forbid code injection through the "variable" options', function(assert) {
+      assert.expect(1);
+
+      assert.raises(function () {
+        _.template('', { 'variable': '){console.log(process.env)}; with(obj' });
+      });
+    });
+
+    QUnit.test('should not execute code injected through the "variable" option', function(assert) {
+      var payloads = [
+        '){sink.hit=true}; with(obj',
+        '){},sink.hit=true,function(',
+        'a,b=(sink.hit=true)',
+        'a, b = (sink.hit = true)',
+        '{a=(sink.hit=true)}',
+        '[a=(sink.hit=true)]',
+        'a/**/,b=(sink.hit=true)'
+      ];
+
+      assert.expect(payloads.length * 2);
+
+      lodashStable.each(payloads, function(payload) {
+        var message,
+            sink = { 'hit': false };
+
+        try {
+          _.template('', { 'imports': { 'sink': sink }, 'variable': payload })([]);
+        } catch (e) {
+          message = e.message;
+        }
+        assert.strictEqual(sink.hit, false, payload);
+        assert.strictEqual(message, 'Invalid `variable` option passed into `_.template`', payload);
+      });
+    });
+
+    QUnit.test('should not execute code injected through an inherited "variable" option', function(assert) {
+      assert.expect(1);
+
+      var sink = { 'hit': false };
+
+      objectProto.variable = '){sink.hit=true}; with(obj';
+      try {
+        _.template('', { 'imports': { 'sink': sink } })([]);
+      } catch (e) {}
+      delete objectProto.variable;
+
+      assert.strictEqual(sink.hit, false);
+    });
+
     QUnit.test('should support custom delimiters', function(assert) {
       assert.expect(2);
 
