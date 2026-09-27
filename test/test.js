@@ -22715,6 +22715,142 @@
 
       assert.deepEqual(actual, ['one', '&quot;two&quot;', 'three']);
     });
+
+    // Related to https://github.com/lodash/lodash/security/advisories/GHSA-xj2r-5m88-79m3
+    QUnit.test('should not execute code via malicious imports key names', function(assert) {
+      assert.expect(2);
+
+      // Default-parameter injection via imports key
+      var executed = false;
+      var key = 'a = (global.templateTest1 = true, 1)';
+      var imports = {};
+      imports[key] = undefined;
+
+      try { _.template('hello', { 'imports': imports }); } catch (e) {}
+      executed = root.templateTest1 === true;
+      delete root.templateTest1;
+
+      assert.strictEqual(executed, false, 'should not execute default-parameter expression in imports key');
+
+      // Same without spaces
+      var executed2 = false;
+      var key2 = 'a=(global.templateTest2=true,1)';
+      var imports2 = {};
+      imports2[key2] = undefined;
+
+      try { _.template('hello', { 'imports': imports2 }); } catch (e) {}
+      executed2 = root.templateTest2 === true;
+      delete root.templateTest2;
+
+      assert.strictEqual(executed2, false, 'should not execute compact default-parameter expression in imports key');
+    });
+
+    // Related to https://github.com/lodash/lodash/security/advisories/GHSA-xj2r-5m88-79m3
+    QUnit.test('should not enumerate inherited keys from imports sources', function(assert) {
+      assert.expect(1);
+
+      // Simulate prototype pollution: inherited key with code injection
+      var executed = false;
+      var payload = 'a = (global.templateTest3 = true, 1)';
+      var proto = {};
+      proto[payload] = undefined;
+      var polluted = Object.create(proto);
+      polluted._ = _;
+
+      try { _.template('hello', { 'imports': polluted }); } catch (e) {}
+      executed = root.templateTest3 === true;
+      delete root.templateTest3;
+
+      assert.strictEqual(executed, false, 'should not execute code from inherited imports keys');
+    });
+
+    QUnit.test('should throw an error for "imports" key names with forbidden identifier characters', function(assert) {
+      var payloads = [
+        'a = (sink.hit = true, 1)',
+        'a=(sink.hit=true,1)',
+        '{a = (sink.hit = true)} = {}',
+        '[a = (sink.hit = true)] = []',
+        'a/**/=(sink.hit=true)',
+        'a\n=(sink.hit=true)',
+        '){sink.hit=true}; function y('
+      ];
+
+      assert.expect(payloads.length * 2);
+
+      lodashStable.each(payloads, function(payload) {
+        var message,
+            sink = { 'hit': false },
+            imports = { 'sink': sink };
+
+        imports[payload] = undefined;
+
+        try {
+          _.template('', { 'imports': imports })();
+        } catch (e) {
+          message = e.message;
+        }
+        assert.strictEqual(sink.hit, false, payload);
+        assert.strictEqual(message, 'Invalid `imports` option passed into `_.template`', payload);
+      });
+    });
+
+    QUnit.test('should ignore inherited "imports" key names and inherited options', function(assert) {
+      assert.expect(6);
+
+      var payload = 'a = (sink.hit = true, 1)';
+
+      var createOptions = [
+        function(sink) {
+          var proto = {};
+          proto[payload] = undefined;
+
+          var imports = Object.create(proto);
+          imports.sink = sink;
+          return { 'imports': imports };
+        },
+        function(sink) {
+          var imports = { 'sink': sink };
+          imports[payload] = undefined;
+          return Object.create({ 'imports': imports });
+        }
+      ];
+
+      lodashStable.each(createOptions, function(createOption) {
+        var compiled,
+            message,
+            sink = { 'hit': false };
+
+        try {
+          compiled = _.template('hello', createOption(sink));
+        } catch (e) {
+          message = e.message;
+        }
+        assert.strictEqual(sink.hit, false);
+        assert.strictEqual(message, undefined);
+        assert.strictEqual(compiled ? compiled() : undefined, 'hello');
+      });
+    });
+
+    QUnit.test('should not execute code injected through `Object.prototype` "imports" key names', function(assert) {
+      assert.expect(3);
+
+      var compiled,
+          message,
+          payload = 'a = (sink.hit = true, 1)',
+          sink = { 'hit': false };
+
+      objectProto[payload] = undefined;
+      try {
+        compiled = _.template('hello', { 'imports': { 'sink': sink } });
+      } catch (e) {
+        message = e.message;
+      }
+      delete objectProto[payload];
+
+      assert.strictEqual(sink.hit, false);
+      assert.strictEqual(message, undefined);
+      assert.strictEqual(compiled ? compiled() : undefined, 'hello');
+    });
   }());
 
   /*--------------------------------------------------------------------------*/
